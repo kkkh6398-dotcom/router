@@ -23,6 +23,7 @@
  *  - SSRF guard is inlined so a leaked relay URL cannot scan internal IPs.
  */
 import { randomUUID } from "crypto";
+import { resolveRelayTarget } from "@/app/api/settings/proxy/deno-deploy/route";
 
 /**
  * Build the multipart/form-data request body for Cloudflare's Worker
@@ -74,7 +75,23 @@ export function buildCloudflareWorkerScript(relayAuth: string): string {
   // relayAuth is generated server-side via randomBytes(24).toString("hex") — no
   // user-controlled input ever reaches this template, so direct interpolation
   // into the worker source string is safe.
+  //
+  // The path-resolution SSRF guard (resolveRelayTarget) is the SAME source used
+  // by the server, the Deno/Vercel relay workers, and the unit tests — embedded
+  // here via Function#toString so this worker enforces byte-for-byte the audited
+  // policy. It is bound to a LITERAL const name (not a bare declaration) so the
+  // hardcoded call site resolves even when the SWC-minified standalone build
+  // mangles the source function's own name in .toString() output (#6149).
+  //
+  // Why this matters (upstream #10935): #4643 replaced `fetch(targetBase +
+  // relayPath)` with resolveRelayTarget() in the Deno and Vercel workers. The
+  // Cloudflare generator, ported separately from upstream decolua/9router PR
+  // #1360, kept the concatenation. Validating x-relay-target and THEN
+  // concatenating x-relay-path is not enough: the path can re-point the request
+  // past the checked host via userinfo ("/x@evil.com"), a backslash
+  // ("\\evil.com"), or a protocol-relative path ("//evil.com/x").
   return `// OmniRoute Cloudflare Worker proxy relay — generated at deploy time.
+const resolveRelayTarget = ${resolveRelayTarget.toString()};
 function isPrivateHostname(h) {
   if (!h) return true;
   const host = h.trim().toLowerCase().replace(/^\\[|\\]$/g, "");
@@ -124,6 +141,12 @@ async function handleRelay(request) {
     return new Response("forbidden x-relay-target (private/loopback host)", { status: 403 });
   }
   const relayPath = request.headers.get("x-relay-path") || "/";
+  // SSRF-safe path resolution via the shared resolveRelayTarget guard (see the
+  // buildCloudflareWorkerScript doc comment); never string-concatenate the path.
+  const resolved = resolveRelayTarget(target, relayPath);
+  if (!resolved.ok) {
+    return new Response(resolved.reason, { status: resolved.status });
+  }
   const headers = new Headers(request.headers);
   ["x-relay-target", "x-relay-path", "x-relay-auth", "host"].forEach((h) => headers.delete(h));
   const init = {
@@ -135,8 +158,7 @@ async function handleRelay(request) {
     init.duplex = "half";
   }
   try {
-    const targetBase = target.endsWith("/") ? target.slice(0, -1) : target;
-    const upstream = await fetch(targetBase + relayPath, init);
+    const upstream = await fetch(resolved.url, init);
     return new Response(upstream.body, {
       status: upstream.status,
       headers: upstream.headers,
