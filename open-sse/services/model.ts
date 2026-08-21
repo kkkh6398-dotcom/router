@@ -807,6 +807,16 @@ async function resolveModelByProviderInference(modelId: string, extendedContext:
   // Fallback: infer provider from known model name prefixes before defaulting to openai
   // FIX #73: Models like claude-haiku-4-5-20251001 sent without provider prefix
   // would incorrectly route to OpenAI. Use heuristic prefix detection first.
+  //
+  // #10856/#10894: only infer a provider from a name prefix when that provider is
+  // actually active. When the operator has NOT configured anthropic/gemini (but
+  // has other providers), forcing the request to the unconfigured provider yields
+  // "0 available accounts" and a misleading "[401] Missing API key" instead of a
+  // truthful model_not_found. A null/empty activeProviders means "no filtering"
+  // (accept the inference).
+  const providerIsActive = (id: string) =>
+    activeProviders === null || activeProviders.size === 0 || activeProviders.has(id);
+
   if (/^claude-/i.test(modelId)) {
     if (
       shouldPreferClaudeCodeForUnprefixedClaudeModel(
@@ -817,12 +827,16 @@ async function resolveModelByProviderInference(modelId: string, extendedContext:
     ) {
       return { provider: "claude", model: modelId, extendedContext };
     }
-    // Claude models → Anthropic provider (canonical source for Claude models)
-    return { provider: "anthropic", model: modelId, extendedContext };
-  }
-  if (/^gemini-/i.test(modelId) || /^gemma-/i.test(modelId)) {
-    // Gemini/Gemma models → Gemini provider
-    return { provider: "gemini", model: modelId, extendedContext };
+    // Claude models → Anthropic provider (canonical source for Claude models),
+    // but only when anthropic is actually available.
+    if (providerIsActive("anthropic")) {
+      return { provider: "anthropic", model: modelId, extendedContext };
+    }
+  } else if (/^gemini-/i.test(modelId) || /^gemma-/i.test(modelId)) {
+    // Gemini/Gemma models → Gemini provider, only when gemini is available.
+    if (providerIsActive("gemini")) {
+      return { provider: "gemini", model: modelId, extendedContext };
+    }
   }
 
   // Last resort: no provider could be inferred — return a clear error instead

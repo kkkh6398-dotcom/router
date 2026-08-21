@@ -132,6 +132,13 @@ export const updateSettingsSchema = z.object({
   hideEndpointTailscaleFunnel: z.boolean().optional(),
   hideEndpointNgrokTunnel: z.boolean().optional(),
   preferClaudeCodeForUnprefixedClaudeModels: z.boolean().optional(),
+  // #10865: the Endpoint page persists a custom system prompt via PATCH
+  // /api/settings ({ customSystemPromptEnabled } / { customSystemPrompt }). These
+  // were absent from the schema, so Zod stripped them and the toggle/text reset
+  // on every reload. Bounded generously (system prompts can be long) in line with
+  // the other large text settings above.
+  customSystemPromptEnabled: z.boolean().optional(),
+  customSystemPrompt: z.string().max(100000).optional(),
   // Opt-in (default "off"): short-circuits Claude Code's `--permission-mode auto`
   // internal security-classifier request with a synthetic ALLOW response instead of
   // calling the upstream provider. "auto" only fires on detected classifier requests;

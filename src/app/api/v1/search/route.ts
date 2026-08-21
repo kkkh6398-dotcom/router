@@ -35,6 +35,8 @@ import {
   rateLimitedProviderResponse,
   type RateLimitedCredentials,
 } from "@/app/api/v1/_shared/rateLimit";
+import { getSettings } from "@/lib/db/settings";
+import { isProviderBlockedByIdOrAlias } from "@/shared/utils/noAuthProviders";
 import { withInjectionGuard } from "@/middleware/promptInjectionGuard";
 
 const CORS_HEADERS = {
@@ -53,7 +55,15 @@ export async function OPTIONS() {
  * GET /v1/search — list available search providers
  */
 export async function GET() {
-  const providers = getAllSearchProviders();
+  // Honor the operator's Settings -> Security -> Blocked Providers list: a
+  // blocked search provider must not be advertised (#10863). getSettings can
+  // fail if the DB is briefly unavailable; fail safe by treating it as no
+  // settings (nothing extra blocked) rather than 500ing the listing.
+  const settings = await getSettings().catch(() => ({}) as Record<string, unknown>);
+  const blockedProviders = (settings as { blockedProviders?: unknown })?.blockedProviders ?? [];
+  const providers = getAllSearchProviders().filter(
+    (p) => !isProviderBlockedByIdOrAlias(p.id, blockedProviders)
+  );
   const timestamp = Math.floor(Date.now() / 1000);
 
   const data = providers.map((p) => ({
@@ -132,8 +142,20 @@ async function postHandler(request: Request, context: unknown) {
   const policy = await enforceApiKeyPolicy(request, "search");
   if (policy.rejection) return policy.rejection;
 
+  // Blocked-provider security policy (#10863). This POST path also backs the MCP
+  // omniroute_web_search tool (open-sse/mcp-server/server.ts fetches /v1/search),
+  // so enforcing here covers both the REST API and the MCP tool.
+  const settings = await getSettings().catch(() => ({}) as Record<string, unknown>);
+  const blockedProviders = (settings as { blockedProviders?: unknown })?.blockedProviders ?? [];
+
   // Resolve provider and credentials
   if (body.provider) {
+    if (isProviderBlockedByIdOrAlias(body.provider, blockedProviders)) {
+      return errorResponse(
+        HTTP_STATUS.FORBIDDEN,
+        `Search provider ${body.provider} is blocked by security policy`
+      );
+    }
     const explicitProvider = resolveSearchProvider(body.provider);
     if (!explicitProvider) {
       return errorResponse(HTTP_STATUS.BAD_REQUEST, `Unknown search provider: ${body.provider}`);
@@ -147,6 +169,23 @@ async function postHandler(request: Request, context: unknown) {
   }
 
   let providerConfig = selectProvider(body.provider, body.search_type);
+  // When auto-selecting (no explicit provider), don't dispatch to a provider the
+  // operator has blocked; fall through to the cheapest unblocked candidate.
+  if (
+    providerConfig &&
+    !body.provider &&
+    isProviderBlockedByIdOrAlias(providerConfig.id, blockedProviders)
+  ) {
+    const unblockedCandidate = Object.values(SEARCH_PROVIDERS)
+      .filter(
+        (p) =>
+          !p.fallbackOnly &&
+          supportsSearchType(p, body.search_type) &&
+          !isProviderBlockedByIdOrAlias(p.id, blockedProviders)
+      )
+      .sort((a, b) => a.costPerQuery - b.costPerQuery)[0];
+    providerConfig = unblockedCandidate || null;
+  }
   if (!providerConfig) {
     return errorResponse(
       HTTP_STATUS.BAD_REQUEST,
@@ -192,7 +231,10 @@ async function postHandler(request: Request, context: unknown) {
       // are reached via the last-resort step below, never the primary pick).
       const sortedIds = Object.values(SEARCH_PROVIDERS)
         .filter(
-          (provider) => !provider.fallbackOnly && supportsSearchType(provider, body.search_type)
+          (provider) =>
+            !provider.fallbackOnly &&
+            supportsSearchType(provider, body.search_type) &&
+            !isProviderBlockedByIdOrAlias(provider.id, blockedProviders)
         )
         .sort((a, b) => a.costPerQuery - b.costPerQuery)
         .map((p) => p.id);

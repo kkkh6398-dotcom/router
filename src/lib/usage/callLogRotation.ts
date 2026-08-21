@@ -20,6 +20,11 @@ import {
   type CallLogDetailState,
 } from "./callLogArtifacts";
 import { getCallLogMaxEntries, getCallLogRetentionDays, getCallLogsTableMaxRows } from "../logEnv";
+import {
+  isCallLogRotationFenced,
+  isSqliteCorruptionError,
+  markCallLogRotationCorrupt,
+} from "./callLogRotationHealth";
 
 const CALL_LOG_ROTATE_THROTTLE_MS = 60_000;
 const CALL_LOG_ROTATE_BATCH_SIZE = 100;
@@ -309,6 +314,12 @@ export function trimCallLogsToMaxRows(
 }
 
 export function rotateCallLogs() {
+  // #10736 — fail-closed: once a corruption signal has fenced rotation, stop
+  // touching the database entirely. Re-running DELETEs against a malformed
+  // pager every ~60s can widen the damage and never recovers on its own; the
+  // fence holds until an operator restores a known-good file (resetCallLogRotationHealth).
+  if (isCallLogRotationFenced()) return;
+
   try {
     if (!CALL_LOGS_DIR || !fs.existsSync(CALL_LOGS_DIR)) return;
 
@@ -324,7 +335,19 @@ export function rotateCallLogs() {
       minAgeMs: CALL_LOG_ORPHAN_MIN_AGE_MS,
     });
   } catch (error) {
-    console.error("[callLogs] Failed to rotate request artifacts:", (error as Error).message);
+    const message = (error as Error).message;
+    // #10736 — a SQLITE_CORRUPT / "database disk image is malformed" error means
+    // the primary DB is damaged. Fence rotation and let the DB health check flip
+    // to degraded, instead of swallowing it and retrying into the broken pager.
+    if (isSqliteCorruptionError(error)) {
+      markCallLogRotationCorrupt(message);
+      console.error(
+        "[callLogs] SQLite corruption detected during rotation — fencing further rotation writes until the database is restored:",
+        message
+      );
+      return;
+    }
+    console.error("[callLogs] Failed to rotate request artifacts:", message);
   }
 }
 
@@ -335,7 +358,16 @@ function runScheduledCallLogRotation() {
     try {
       rotateCallLogs();
     } catch (error) {
-      console.error("[callLogs] Failed to rotate request artifacts:", (error as Error).message);
+      const message = (error as Error).message;
+      if (isSqliteCorruptionError(error)) {
+        markCallLogRotationCorrupt(message);
+        console.error(
+          "[callLogs] SQLite corruption detected during rotation — fencing further rotation writes until the database is restored:",
+          message
+        );
+      } else {
+        console.error("[callLogs] Failed to rotate request artifacts:", message);
+      }
     } finally {
       callLogRotateInFlight = false;
     }

@@ -1882,18 +1882,25 @@ export async function GET(
     }
 
     if (isAnthropicCompatibleProvider(provider)) {
-      const cachedResponse = maybeReturnCachedDiscovery();
-      if (cachedResponse) return cachedResponse;
-
-      const autoFetchDisabledResponse = maybeReturnAutoFetchDisabled();
-      if (autoFetchDisabledResponse) return autoFetchDisabledResponse;
-
+      // Claude-Code-compatible providers proxy a CC endpoint that has no models
+      // listing at all, so surface the "does not support models listing" 400
+      // BEFORE the cached-discovery / auto-fetch fallbacks below. Those
+      // fallbacks return HTTP 200 with an empty (or cached) model list, which
+      // masked the unsupported-listing contract for a freshly-created CC
+      // connection with no synced models (upstream #10795 / #10863 base-red:
+      // GET /api/providers/:id/models returned 200 instead of 400).
       if (isClaudeCodeCompatibleProvider(provider)) {
         return NextResponse.json(
           { error: `Provider ${provider} does not support models listing` },
           { status: 400 }
         );
       }
+
+      const cachedResponse = maybeReturnCachedDiscovery();
+      if (cachedResponse) return cachedResponse;
+
+      const autoFetchDisabledResponse = maybeReturnAutoFetchDisabled();
+      if (autoFetchDisabledResponse) return autoFetchDisabledResponse;
 
       let baseUrl = getProviderBaseUrl(connection.providerSpecificData);
       if (!baseUrl) {
