@@ -130,7 +130,7 @@ test("Antigravity BYOP 422 rotates to a sibling account and the request succeeds
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
     }
-    if (request.url.includes("cloudcode-pa.googleapis.com")) {
+    if (new URL(request.url).hostname === "cloudcode-pa.googleapis.com") {
       modelCalls.push({
         token: (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, ""),
       });

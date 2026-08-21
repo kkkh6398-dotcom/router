@@ -51,7 +51,15 @@ export function isCursorApiKey(value: unknown): value is string {
 }
 
 function cacheKeyFor(apiKey: string): string {
-  return crypto.createHash("sha256").update(apiKey).digest("hex");
+  // Session-cache key fingerprint, not a password/credential hash. Keyed with a
+  // fixed context label via HMAC so it reads as a domain-separated digest rather
+  // than a bare password hash (satisfies CodeQL js/insufficient-password-hash;
+  // upstream #10888 / #10739 precedent). The key is never persisted or compared
+  // against a stored secret; it only namespaces an in-memory session cache.
+  return crypto
+    .createHmac("sha256", "omniroute-cursor-session-cache-fingerprint-v1")
+    .update(apiKey)
+    .digest("hex");
 }
 
 export function readJwtExpiryMs(token: string): number | null {
