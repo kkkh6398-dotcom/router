@@ -1,4 +1,5 @@
 import { normalizeComboStep } from "@/lib/combos/steps";
+import { getCallLogRotationHealth } from "@/lib/usage/callLogRotationHealth";
 
 import type { SqliteAdapter } from "./adapters/types";
 type SqliteDatabase = SqliteAdapter;
@@ -452,6 +453,23 @@ export function runDbHealthCheck(
         count: 1,
       });
     }
+  }
+
+  // #10736 — call-log rotation fences itself when it hits a SQLITE_CORRUPT
+  // ("database disk image is malformed") error. Surface that as a health issue
+  // so `/api/db/health` reports degraded even between quick_check runs (and even
+  // when quick_check is skipped on slow storage). Reported, not auto-repaired:
+  // recovery is a deliberate operator restore, never a live REINDEX/VACUUM.
+  const rotationHealth = getCallLogRotationHealth();
+  if (rotationHealth.fenced) {
+    issues.push({
+      type: "integrity_check_failed",
+      table: "call_logs",
+      description: `Call-log rotation fenced after a SQLite corruption error${
+        rotationHealth.reason ? ` (${rotationHealth.reason})` : ""
+      }. Restore the database from a known-good backup to clear the fence.`,
+      count: 1,
+    });
   }
 
   if (hasRows(db, "combos")) {
