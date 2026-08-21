@@ -9,6 +9,8 @@ import {
 } from "@/lib/localDb";
 import { getCachedSettings } from "@/lib/localDb";
 import { getActiveSyncedCatalog } from "@/lib/db/models/activeSyncedCatalog";
+import { getModelCompatOverrides } from "@/lib/db/models/compat";
+import { getNoAuthHydrationProviderIds } from "./noAuthProviderSiblings";
 import {
   parseModel,
   getModelInfoCore,
@@ -224,18 +226,36 @@ function findLiveCatalogModelMeta(
   );
 }
 
-function resolveRuntimeFormats(customMatch: any, syncedMatch: any): RuntimeModelMeta {
+function resolveRuntimeFormats(
+  customMatch: any,
+  syncedMatch: any,
+  compatOverrideMatch: any
+): RuntimeModelMeta {
   const apiFormat =
-    customMatch?.apiFormat === "responses" || syncedMatch?.apiFormat === "responses"
-      ? "responses"
-      : undefined;
+    (typeof customMatch?.apiFormat === "string" ? customMatch.apiFormat : undefined) ||
+    (typeof compatOverrideMatch?.apiFormat === "string" ? compatOverrideMatch.apiFormat : undefined) ||
+    (syncedMatch?.apiFormat === "responses" ? "responses" : undefined);
   const targetFormat =
     typeof customMatch?.targetFormat === "string"
       ? customMatch.targetFormat
-      : typeof syncedMatch?.targetFormat === "string"
-        ? syncedMatch.targetFormat
-        : undefined;
-  return { ...(apiFormat ? { apiFormat } : {}), ...(targetFormat ? { targetFormat } : {}) };
+      : typeof compatOverrideMatch?.targetFormat === "string"
+        ? compatOverrideMatch.targetFormat
+        : typeof syncedMatch?.targetFormat === "string"
+          ? syncedMatch.targetFormat
+          : undefined;
+  const supportsVision =
+    typeof customMatch?.supportsVision === "boolean"
+      ? customMatch.supportsVision
+      : typeof compatOverrideMatch?.supportsVision === "boolean"
+        ? compatOverrideMatch.supportsVision
+        : typeof syncedMatch?.supportsVision === "boolean"
+          ? syncedMatch.supportsVision
+          : undefined;
+  return {
+    ...(apiFormat ? { apiFormat } : {}),
+    ...(targetFormat ? { targetFormat } : {}),
+    ...(supportsVision !== undefined ? { supportsVision } : {}),
+  };
 }
 
 function copySyncedThinkingMetadata(metadata: RuntimeModelMeta, syncedMatch: any): void {
@@ -269,9 +289,10 @@ function copyRegistryThinkingMetadata(metadata: RuntimeModelMeta, registryMatch:
 function buildRuntimeModelMeta(
   customMatch: any,
   syncedMatch: any,
-  registryMatch: any
+  registryMatch: any,
+  compatOverrideMatch: any
 ): RuntimeModelMeta {
-  const metadata = resolveRuntimeFormats(customMatch, syncedMatch);
+  const metadata = resolveRuntimeFormats(customMatch, syncedMatch, compatOverrideMatch);
   copyRegistryThinkingMetadata(metadata, registryMatch);
   copySyncedThinkingMetadata(metadata, syncedMatch);
   return metadata;
@@ -286,9 +307,20 @@ async function lookupModelMeta(
   available: boolean;
 }> {
   try {
-    const [customModels, liveCatalog] = await Promise.all([
+    const [customModels, liveCatalog, compatOverrides] = await Promise.all([
       getCustomModels(providerId),
       getActiveSyncedCatalog(providerId),
+      // #10898 / #7620: model-compat overrides (apiFormat/targetFormat/
+      // supportsVision, isHidden, ...) are stored keyed on the id the operator
+      // wrote them under. For a no-auth alias the model prefix resolves to the
+      // APIKEY gateway id (e.g. "opencode/x" -> providerId "opencode-zen") but
+      // the override was written on the sibling "opencode" row. Merge overrides
+      // across the provider AND its no-auth sibling ids (requested id first)
+      // instead of canonicalizing the low-level key, which would break paths
+      // that legitimately key on the raw id (e.g. getHiddenModelsByProvider).
+      Promise.resolve(
+        getNoAuthHydrationProviderIds(providerId).flatMap((id) => getModelCompatOverrides(id))
+      ),
     ]);
     const syncedModels = liveCatalog.models;
 
@@ -327,6 +359,9 @@ async function lookupModelMeta(
       syncedModels
     );
     const registryMatch = findRegistryModel(providerId, resolvedModelId);
+    const compatOverrideMatch = Array.isArray(compatOverrides)
+      ? compatOverrides.find((m) => m.id === resolvedModelId || m.id === modelId)
+      : undefined;
     const effortBaseModelId = getRegisteredProviderEffortBaseModelId(providerId, modelId);
 
     const liveBackedEffortVariant =
@@ -335,7 +370,7 @@ async function lookupModelMeta(
     const available =
       !liveCatalog.authoritative || Boolean(customMatch || syncedMatch || liveBackedEffortVariant);
 
-    const metadata = buildRuntimeModelMeta(customMatch, syncedMatch, registryMatch);
+    const metadata = buildRuntimeModelMeta(customMatch, syncedMatch, registryMatch, compatOverrideMatch);
     if (effort) metadata.resolvedThinkingEffort = effort;
 
     return { modelId: resolvedModelId, metadata, available };
