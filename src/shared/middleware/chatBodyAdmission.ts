@@ -18,6 +18,7 @@
 import { CORS_HEADERS } from "../utils/cors";
 import { createHmac } from "crypto";
 import v8 from "node:v8";
+import { trackRequest } from "../../lib/gracefulShutdown";
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(String(value), 10);
@@ -229,6 +230,7 @@ export class ChatAdmissionController {
   tryAcquireHealthyHeadroom(): ChatAdmissionLease | null {
     if (this.#activeHealthy >= this.healthyHeadroom) return null;
     this.#activeHealthy += 1;
+    const done = trackRequest();
     let released = false;
     return {
       get released() {
@@ -238,6 +240,7 @@ export class ChatAdmissionController {
         if (released) return;
         released = true;
         this.#activeHealthy = Math.max(0, this.#activeHealthy - 1);
+        done();
       },
     };
   }
@@ -264,6 +267,7 @@ export class ChatAdmissionController {
   tryAcquireHeavy(): ChatAdmissionLease | null {
     if (this.#activeHeavy >= this.maxHeavyInFlight) return null;
     this.#activeHeavy += 1;
+    const done = trackRequest();
     let released = false;
     return {
       get released() {
@@ -273,6 +277,7 @@ export class ChatAdmissionController {
         if (released) return;
         released = true;
         this.#activeHeavy = Math.max(0, this.#activeHeavy - 1);
+        done();
         this.#dispatchFair();
       },
     };
