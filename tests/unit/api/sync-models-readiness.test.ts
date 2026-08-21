@@ -248,3 +248,52 @@ test("sanity: without readiness gate, 17 callers retry independently (amplificat
     "without gate, callers retry independently, got " + modelFetchCalls + " (expected >17)"
   );
 });
+
+// ---------------------------------------------------------------------------
+// #10903: a failed readiness probe must NOT be memoized forever.
+// ---------------------------------------------------------------------------
+
+test("ensureLoopbackServerReady: re-probes after a failure instead of memoizing the rejection", async () => {
+  __resetLoopbackReadinessForTests();
+
+  // First episode: the server is down, the probe times out and rejects.
+  let downProbeCalls = 0;
+  const downFetch = async (_url) => {
+    downProbeCalls++;
+    throw new Error("ECONNREFUSED");
+  };
+  await assert.rejects(
+    () => ensureLoopbackServerReady({ fetch: downFetch, maxWaitMs: 30, pollMs: 10 }),
+    /loopback server not ready/
+  );
+  assert.ok(downProbeCalls >= 1, "the first (failing) probe should have run");
+
+  // Second episode (WITHOUT calling the test reset): the server is now up. Before
+  // the fix, the cached rejected promise was returned and this call would reject
+  // (or never re-probe). After the fix, the cache was cleared on failure, so a
+  // fresh probe runs and resolves.
+  let upProbeCalls = 0;
+  const upFetch = async (_url) => {
+    upProbeCalls++;
+    return new Response("", { status: 404 });
+  };
+  await ensureLoopbackServerReady({ fetch: upFetch, maxWaitMs: 500, pollMs: 10 });
+  assert.equal(
+    upProbeCalls,
+    1,
+    "a fresh probe must run after a prior failure (rejection was not memoized)"
+  );
+});
+
+test("ensureLoopbackServerReady: a successful probe IS memoized (only one probe for a healthy process)", async () => {
+  __resetLoopbackReadinessForTests();
+  let probeCalls = 0;
+  const upFetch = async (_url) => {
+    probeCalls++;
+    return new Response("", { status: 200 });
+  };
+  await ensureLoopbackServerReady({ fetch: upFetch, maxWaitMs: 500, pollMs: 10 });
+  // A second call after success must reuse the cached resolved promise, no new probe.
+  await ensureLoopbackServerReady({ fetch: upFetch, maxWaitMs: 500, pollMs: 10 });
+  assert.equal(probeCalls, 1, "a resolved readiness promise is cached; no re-probe on success");
+});
