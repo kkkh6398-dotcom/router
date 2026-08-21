@@ -154,6 +154,12 @@ export function resolveNextBuildEnv(baseEnv = process.env, platform = process.pl
   const env = {
     ...baseEnv,
     NEXT_PRIVATE_BUILD_WORKER: baseEnv.NEXT_PRIVATE_BUILD_WORKER || "0",
+    // Reliable build signal inherited by every spawned `next build` worker.
+    // Next.js workers sometimes drop NEXT_PHASE, so DB entry points key off
+    // OMNIROUTE_BUILDING=1 to stub out SQLite and never load the native
+    // better-sqlite3 addon (its Statement destructor SIGABRTs at worker
+    // teardown: node::RemoveEnvironmentCleanupHook). (#10060)
+    OMNIROUTE_BUILDING: "1",
   };
 
   // Windows-only: `next build`'s static-generation glob scan and framework cache
