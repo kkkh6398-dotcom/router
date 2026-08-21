@@ -233,8 +233,20 @@ export function createSyncDriverFactory(load: DriverLoader, betterSqliteProbe?: 
       }
     }
 
-    // better-sqlite3: rápido, nativo — skip em Bun
-    if (!process.versions.bun && mayLoadBetterSqlite()) {
+    // better-sqlite3: rápido, nativo — skip em Bun e durante o build.
+    // Next.js build workers às vezes perdem NEXT_PHASE do process.env, então
+    // OMNIROUTE_BUILDING=1 (setado por build-next-isolated.mjs e herdado pelos
+    // build workers) é o sinal primário de build. Deliberadamente NÃO checa
+    // isMainThread: em runtime muitos worker threads (pino thread-stream,
+    // compression workers) legitimamente usam better-sqlite3, e pulá-lo lá
+    // degradaria silenciosamente para node:sqlite / sql.js em produção. Durante
+    // o build o addon nativo não pode carregar: o destrutor do Statement aborta
+    // com SIGABRT no teardown do worker (node::RemoveEnvironmentCleanupHook). (#10060)
+    const isBuild =
+      process.env.NEXT_PHASE === "phase-production-build" ||
+      process.env.OMNIROUTE_BUILDING === "1" ||
+      process.env.npm_lifecycle_event === "build";
+    if (!process.versions.bun && !isBuild && mayLoadBetterSqlite()) {
       try {
         const BetterSqlite = load("better-sqlite3") as {
           new (p: string, o?: object): import("better-sqlite3").Database;
