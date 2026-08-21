@@ -186,7 +186,7 @@ export type EnsureReadyOptions = {
 
 export async function ensureLoopbackServerReady(opts: EnsureReadyOptions = {}): Promise<void> {
   if (__loopbackReadyPromise != null) return __loopbackReadyPromise;
-  __loopbackReadyPromise = (async () => {
+  const attempt = (async () => {
     const f = opts.fetch ?? fetchModelSyncInternal;
     const maxWaitMs = opts.maxWaitMs ?? 30_000;
     const pollMs = opts.pollMs ?? 250;
@@ -213,12 +213,39 @@ export async function ensureLoopbackServerReady(opts: EnsureReadyOptions = {}): 
     }
     throw new Error(`loopback server not ready within ${maxWaitMs}ms: ${String(lastErr)}`);
   })();
-  return __loopbackReadyPromise;
+  __loopbackReadyPromise = attempt;
+  // #10903: a rejected readiness promise must NOT be memoized. The old code
+  // cached the rejection forever, so a single failed probe at boot sent the
+  // whole process to the in-process fallback permanently — no probe ever ran
+  // again. Clear the cache on failure so the NEXT caller re-probes (the server
+  // usually comes up moments later); keep the resolved promise cached so a
+  // healthy process still runs exactly one probe sequence.
+  attempt.catch(() => {
+    if (__loopbackReadyPromise === attempt) {
+      __loopbackReadyPromise = null;
+    }
+  });
+  return attempt;
 }
 
 /** Test helper: reset the cached promise so tests can re-exercise the probe. */
 export function __resetLoopbackReadinessForTests(): void {
   __loopbackReadyPromise = null;
+  __lastReadinessWarnAt = 0;
+}
+
+// #10903: throttle the readiness-failure warning. Previously every waiting caller
+// logged the same failure (270 log lines in 26h, in bursts of 54). With the
+// memoization fix a fresh probe can now run per caller, so without a throttle the
+// log volume could grow. Emit at most one warning per window across all callers.
+let __lastReadinessWarnAt = 0;
+const READINESS_WARN_THROTTLE_MS = 60_000;
+
+function warnReadinessFailureThrottled(message: string): void {
+  const now = Date.now();
+  if (now - __lastReadinessWarnAt < READINESS_WARN_THROTTLE_MS) return;
+  __lastReadinessWarnAt = now;
+  console.warn(message);
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +313,9 @@ export async function selfFetchWithRetry(
       await ensureLoopbackServerReady({ fetch: f });
     } catch (err) {
       // Readiness probe timed out — fall straight through to in-process fallback.
-      console.warn(
+      // Throttled: with the #10903 memoization fix the probe can re-run, so many
+      // callers could otherwise each log the same failure.
+      warnReadinessFailureThrottled(
         `[ModelSync] Loopback server readiness probe failed; falling back to in-process route immediately (${connLabel}): ${String(err)}`
       );
       if (opts.inProcessFallback) {
