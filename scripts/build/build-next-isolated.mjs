@@ -160,6 +160,9 @@ export function resolveNextBuildEnv(baseEnv = process.env, platform = process.pl
     // better-sqlite3 addon (its Statement destructor SIGABRTs at worker
     // teardown: node::RemoveEnvironmentCleanupHook). (#10060)
     OMNIROUTE_BUILDING: "1",
+    // No telemetry, anywhere: disable Next.js's anonymous build-time telemetry
+    // on every build path (local, CI, Docker), not just the image build.
+    NEXT_TELEMETRY_DISABLED: baseEnv.NEXT_TELEMETRY_DISABLED || "1",
   };
 
   // Windows-only: `next build`'s static-generation glob scan and framework cache

@@ -59,6 +59,12 @@ RUN set -eux; \
 # ── Builder ────────────────────────────────────────────────────────────────
 FROM base AS builder
 
+# No telemetry, anywhere. Disable Next.js's anonymous build-time telemetry
+# (it otherwise pings Vercel during `next build`). Set on the builder stage so
+# every image build is silent; the runtime never builds, so this covers the
+# only phase Next telemetry can fire.
+ENV NEXT_TELEMETRY_DISABLED=1
+
 # Build tools for native module compilation
 # apt-get update needed here because base's rm -rf clears the shared cache
 RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,target=/var/cache/apt,sharing=locked \
