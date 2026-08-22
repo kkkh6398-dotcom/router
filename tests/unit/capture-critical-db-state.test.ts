@@ -8,10 +8,10 @@ import path from "node:path";
 // so we must create the temp dir and import exactly once.
 let tempDir: string;
 let originalDataDir: string | undefined;
-let getDbInstance: any;
-let resetDbInstance: any;
-let ensureDbInitialized: any;
-let closeDbInstance: any;
+let getDbInstance: typeof import("../../src/lib/db/core.ts").getDbInstance;
+let resetDbInstance: typeof import("../../src/lib/db/core.ts").resetDbInstance;
+let ensureDbInitialized: typeof import("../../src/lib/db/core.ts").ensureDbInitialized;
+let closeDbInstance: typeof import("../../src/lib/db/core.ts").closeDbInstance;
 
 before(async () => {
   tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omniroute-db-test-"));
