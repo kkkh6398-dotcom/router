@@ -141,6 +141,9 @@ const IGNORE_FROM_CODE = new Set([
   "HOMOLOG_EXPECT_VERSION",
   // update-notifier opt-out for the CLI binary.
   "OMNIROUTE_NO_UPDATE_NOTIFIER",
+  // Standalone output dir override & Electron smoke test harness knob
+  "OMNIROUTE_STANDALONE_DIR",
+  "ELECTRON_SMOKE_COLD_RESTART",
   // Headless CLI execution flag for Electron.
   "OMNIROUTE_HEADLESS",
   // Platform / OS detection vars read by CLI environment helper (bin/cli/utils/environment.mjs).
