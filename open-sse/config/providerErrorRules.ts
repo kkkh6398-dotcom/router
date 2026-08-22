@@ -45,6 +45,45 @@ export type ProviderErrorRuleMatch = {
   cooldownMs?: number;
 };
 
+/**
+ * Operator-declared per-provider error rule (settings-driven).
+ *
+ * Mirrors the catalog `ProviderErrorRule` but is data-only so an operator can
+ * add a scope/cooldown/reason override for a provider without editing this
+ * file. `match` is a plain case-insensitive SUBSTRING of the error body — never
+ * a RegExp — so an operator-supplied pattern can never introduce a ReDoS on the
+ * error-classification hot path. Bounded to <= 50 rules total by the settings
+ * schema. An operator rule is consulted BEFORE the built-in `providerRuleRegistry`
+ * and wins on the first status+substring match for a provider.
+ */
+export type OperatorProviderErrorRule = {
+  status: number;
+  match: string;
+  scope: "model" | "provider" | "connection";
+  reason?: ConfiguredErrorReason;
+  cooldownMs?: number;
+};
+
+let operatorProviderErrorRules: Record<string, OperatorProviderErrorRule[]> = {};
+
+/**
+ * Inject operator-declared rules. Called from the runtime-settings applier
+ * (`applyRuntimeSettings`) once at boot and on every settings update, with the
+ * value validated by the settings schema. Pass `undefined`/empty/null to clear.
+ * Provider keys are lowercased so lookups are case-insensitive.
+ */
+export function setOperatorProviderErrorRules(
+  rules: Record<string, OperatorProviderErrorRule[]> | undefined | null
+): void {
+  operatorProviderErrorRules = {};
+  if (!rules) return;
+  for (const [provider, list] of Object.entries(rules)) {
+    if (Array.isArray(list) && list.length > 0) {
+      operatorProviderErrorRules[provider.toLowerCase()] = list;
+    }
+  }
+}
+
 // ─── Opencode ───────────────────────────────────────────────────────────────────
 // Opencode Go uses an account-wide quota. The body usually says "rate limit
 // reached" but the presence of `x-ratelimit-remaining-requests: 0` is the
@@ -248,6 +287,42 @@ function buildAgentrouterRules(): ProviderErrorRule[] {
   ];
 }
 
+// ─── NVIDIA ──────────────────────────────────────────────────────────────────
+// A NIM function id that has been withdrawn returns 404 with "not found" in the
+// body. The model is dead for this account, so we evict just the model (scope
+// "model") rather than cooling the whole connection — combo then fails over to
+// a healthy model instead of re-targeting the dead id.
+function buildNvidiaRules(): ProviderErrorRule[] {
+  return [
+    {
+      id: "nvidia-model-not-found",
+      match: ({ status, body }) => {
+        if (status !== 404) return null;
+        const text = JSON.stringify(body ?? "").toLowerCase();
+        if (!text.includes("not found")) return null;
+        return { reason: "quota_exhausted", scope: "model" };
+      },
+    },
+  ];
+}
+
+// ─── HuggingFace ────────────────────────────────────────────────────────────
+// A requested model that no longer exists returns 400 with "does not exist" in
+// the body. Same shape as the NVIDIA case: evict the model, not the connection.
+function buildHuggingfaceRules(): ProviderErrorRule[] {
+  return [
+    {
+      id: "huggingface-model-does-not-exist",
+      match: ({ status, body }) => {
+        if (status !== 400) return null;
+        const text = JSON.stringify(body ?? "").toLowerCase();
+        if (!text.includes("does not exist")) return null;
+        return { reason: "quota_exhausted", scope: "model" };
+      },
+    },
+  ];
+}
+
 /**
  * Global registry. Provider name → ordered list of rules (first match wins).
  * Add new providers here; the matcher in classifyError will pick them up
@@ -262,6 +337,8 @@ export const providerRuleRegistry = new Map<string, ProviderErrorRule[]>([
   ["cloudflare-ai", buildCloudflareAiRules()],
   ["openrouter", buildOpenrouterRules()],
   ["agentrouter", buildAgentrouterRules()],
+  ["nvidia", buildNvidiaRules()],
+  ["huggingface", buildHuggingfaceRules()],
 ]);
 
 /**
@@ -346,10 +423,32 @@ export function getProviderErrorRuleMatch(
   provider: string | null | undefined,
   status: number,
   headers: Headers | Record<string, string> | null | undefined,
-  body?: unknown
+  body?: unknown,
+  operatorRules?: Record<string, OperatorProviderErrorRule[]>
 ): ProviderErrorRuleMatch | null {
   if (!provider) return null;
-  const rules = providerRuleRegistry.get(provider.toLowerCase());
+  const key = provider.toLowerCase();
+
+  // Operator-declared rules win first: an operator can override any catalog
+  // rule for a provider without editing this file. `operatorRules` is the
+  // injected source (tests / direct callers); when omitted we fall back to the
+  // settings-backed cache populated by `setOperatorProviderErrorRules`.
+  const opRules = (operatorRules ?? operatorProviderErrorRules)?.[key];
+  if (opRules && opRules.length > 0) {
+    const text = typeof body === "string" ? body : JSON.stringify(body ?? "");
+    const lowered = text.toLowerCase();
+    for (const r of opRules) {
+      if (r.status === status && lowered.includes(r.match.toLowerCase())) {
+        return {
+          reason: r.reason ?? "quota_exhausted",
+          scope: r.scope,
+          cooldownMs: r.cooldownMs,
+        };
+      }
+    }
+  }
+
+  const rules = providerRuleRegistry.get(key);
   if (!rules) return null;
   // Normalize headers: accept either a `Headers` object (from `fetch()`) or
   // a plain record. Provider rules access headers via plain object indexing.
